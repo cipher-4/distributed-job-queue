@@ -1,0 +1,48 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: reliable-job-queue
+  profiles:
+    active: default
+  datasource:
+    url: jdbc:h2:mem:jobqueuedb;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE;MODE=PostgreSQL
+    driverClassName: org.h2.Driver
+    username: sa
+    password: ""
+  jpa:
+    database-platform: org.hibernate.dialect.H2Dialect
+    hibernate:
+      ddl-auto: validate
+    show-sql: false
+    properties:
+      hibernate:
+        format_sql: false
+  flyway:
+    enabled: true
+    baseline-on-migrate: true
+
+queue:
+  node-mode: ALL_IN_ONE # ALL_IN_ONE, PRODUCER, or WORKER
+  worker:
+    enabled: true
+    worker-id: worker-local
+    concurrency: 4
+    batch-size: 5
+    poll-interval-ms: 1000
+    lease-duration-seconds: 30
+    heartbeat-interval-ms: 10000
+    zombie-reaper-interval-ms: 10000
+  retry:
+    default-max-retries: 3
+    default-backoff-base-seconds: 2
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: always
