@@ -1,0 +1,30 @@
+{
+  "family": "reliable-job-queue-worker",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "1024",
+  "memory": "2048",
+  "containerDefinitions": [
+    {
+      "name": "worker-engine",
+      "image": "123456789012.dkr.ecr.us-east-1.amazonaws.com/reliable-job-queue:latest",
+      "essential": true,
+      "environment": [
+        { "name": "SPRING_PROFILES_ACTIVE", "value": "postgres" },
+        { "name": "QUEUE_NODE_MODE", "value": "WORKER" },
+        { "name": "QUEUE_WORKER_ENABLED", "value": "true" },
+        { "name": "QUEUE_WORKER_CONCURRENCY", "value": "8" },
+        { "name": "QUEUE_WORKER_BATCH_SIZE", "value": "10" },
+        { "name": "QUEUE_WORKER_LEASE_DURATION_SECONDS", "value": "45" }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/reliable-job-queue-worker",
+          "awslogs-region": "us-east-1",
+          "awslogs-stream-prefix": "ecs"
+        }
+      }
+    }
+  ]
+}

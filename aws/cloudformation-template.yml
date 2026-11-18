@@ -1,0 +1,192 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Reliable Job Queue - Production AWS ECS Fargate & Amazon RDS PostgreSQL Stack'
+
+Parameters:
+  VpcCIDR:
+    Type: String
+    Default: '10.0.0.0/16'
+    Description: 'CIDR Block for VPC'
+  DBPassword:
+    Type: String
+    NoEcho: true
+    Description: 'Master password for Amazon RDS PostgreSQL instance'
+    MinLength: 8
+  ContainerImage:
+    Type: String
+    Default: '123456789012.dkr.ecr.us-east-1.amazonaws.com/reliable-job-queue:latest'
+    Description: 'ECR Image URI for the Reliable Job Queue service'
+
+Resources:
+  # ==========================================================
+  # Networking: VPC, Subnets, Internet Gateway
+  # ==========================================================
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCIDR
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: ReliableJobQueue-VPC
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+  VPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: '10.0.1.0/24'
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: true
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: '10.0.2.0/24'
+      AvailabilityZone: !Select [1, !GetAZs '']
+      MapPublicIpOnLaunch: true
+
+  # ==========================================================
+  # Database: Amazon RDS PostgreSQL 16
+  # ==========================================================
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: 'Subnets for PostgreSQL RDS'
+      SubnetIds:
+        - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
+
+  DBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: 'Enable PostgreSQL access from ECS tasks'
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          CidrIp: '10.0.0.0/16'
+
+  PostgresRDSInstance:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBName: jobqueuedb
+      AllocatedStorage: '20'
+      DBInstanceClass: db.t4g.micro
+      Engine: postgres
+      EngineVersion: '16.1'
+      MasterUsername: postgres
+      MasterUserPassword: !Ref DBPassword
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      VPCSecurityGroups:
+        - !Ref DBSecurityGroup
+      MultiAZ: false
+      PubliclyAccessible: false
+      StorageType: gp3
+
+  # ==========================================================
+  # Compute: AWS ECS Cluster (Fargate)
+  # ==========================================================
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: ReliableJobQueue-Cluster
+
+  ECSTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+
+  # ==========================================================
+  # Producer API Service (Fargate Task)
+  # ==========================================================
+  ProducerTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: rjq-producer-task
+      Cpu: '512'
+      Memory: '1024'
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      ExecutionRoleArn: !GetAtt ECSTaskExecutionRole.Arn
+      ContainerDefinitions:
+        - Name: producer-api
+          Image: !Ref ContainerImage
+          Essential: true
+          PortMappings:
+            - ContainerPort: 8080
+          Environment:
+            - Name: SPRING_PROFILES_ACTIVE
+              Value: postgres
+            - Name: QUEUE_NODE_MODE
+              Value: PRODUCER
+            - Name: QUEUE_WORKER_ENABLED
+              Value: "false"
+            - Name: SPRING_DATASOURCE_URL
+              Value: !Sub 'jdbc:postgresql://${PostgresRDSInstance.Endpoint.Address}:5432/jobqueuedb'
+            - Name: SPRING_DATASOURCE_USERNAME
+              Value: postgres
+            - Name: SPRING_DATASOURCE_PASSWORD
+              Value: !Ref DBPassword
+
+  # ==========================================================
+  # Scalable Worker Cluster Service (Fargate Task)
+  # ==========================================================
+  WorkerTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: rjq-worker-task
+      Cpu: '1024'
+      Memory: '2048'
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      ExecutionRoleArn: !GetAtt ECSTaskExecutionRole.Arn
+      ContainerDefinitions:
+        - Name: worker-engine
+          Image: !Ref ContainerImage
+          Essential: true
+          Environment:
+            - Name: SPRING_PROFILES_ACTIVE
+              Value: postgres
+            - Name: QUEUE_NODE_MODE
+              Value: WORKER
+            - Name: QUEUE_WORKER_ENABLED
+              Value: "true"
+            - Name: QUEUE_WORKER_CONCURRENCY
+              Value: "8"
+            - Name: QUEUE_WORKER_BATCH_SIZE
+              Value: "10"
+            - Name: SPRING_DATASOURCE_URL
+              Value: !Sub 'jdbc:postgresql://${PostgresRDSInstance.Endpoint.Address}:5432/jobqueuedb'
+            - Name: SPRING_DATASOURCE_USERNAME
+              Value: postgres
+            - Name: SPRING_DATASOURCE_PASSWORD
+              Value: !Ref DBPassword
+
+Outputs:
+  RDSEndpoint:
+    Description: 'PostgreSQL RDS Connection Endpoint'
+    Value: !GetAtt PostgresRDSInstance.Endpoint.Address
+  ECSClusterName:
+    Description: 'ECS Fargate Cluster Name'
+    Value: !Ref ECSCluster
