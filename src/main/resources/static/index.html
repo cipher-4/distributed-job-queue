@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Reliable Job Queue Dashboard</title>
+    <link rel="stylesheet" href="style.css">
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <header class="navbar">
+        <div class="brand">
+            <span class="logo-icon">⚡</span>
+            <div>
+                <h1>Reliable Job Queue</h1>
+                <p class="subtitle">Distributed Background Engine with DLQ Recovery &amp; Leases</p>
+            </div>
+        </div>
+        <div class="nav-controls">
+            <span id="worker-status-badge" class="badge badge-active">Worker: Active</span>
+            <button id="refresh-btn" class="btn btn-secondary">↻ Refresh</button>
+            <button id="trigger-claim-btn" class="btn btn-secondary">⚡ Trigger Worker Claim</button>
+        </div>
+    </header>
+
+    <main class="container">
+        <!-- Stat Cards -->
+        <section class="stats-grid">
+            <div class="stat-card">
+                <span class="stat-label">Pending (Ready)</span>
+                <span class="stat-value text-blue" id="stat-pending">0</span>
+                <span class="stat-sub">Ready to be claimed</span>
+            </div>
+            <div class="stat-card">
+                <span class="stat-label">Delayed / Scheduled</span>
+                <span class="stat-value text-purple" id="stat-delayed">0</span>
+                <span class="stat-sub">Scheduled for future</span>
+            </div>
+            <div class="stat-card">
+                <span class="stat-label">In-Flight (Running)</span>
+                <span class="stat-value text-yellow" id="stat-running">0</span>
+                <span class="stat-sub">Active worker leases</span>
+            </div>
+            <div class="stat-card">
+                <span class="stat-label">Completed</span>
+                <span class="stat-value text-green" id="stat-completed">0</span>
+                <span class="stat-sub">Successfully processed</span>
+            </div>
+            <div class="stat-card">
+                <span class="stat-label">Dead-Letter Queue</span>
+                <span class="stat-value text-red" id="stat-dlq">0</span>
+                <span class="stat-sub" id="stat-unreplayed-dlq">0 unreplayed</span>
+            </div>
+        </section>
+
+        <!-- Quick Action & Create Form -->
+        <section class="two-column">
+            <div class="card">
+                <div class="card-header">
+                    <h2>Submit New Background Job</h2>
+                    <span class="badge badge-info">Durable Postgres Queue</span>
+                </div>
+                <form id="enqueue-form">
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="job-type">Job Type</label>
+                            <select id="job-type" required>
+                                <option value="PAYMENT_PROCESS">PAYMENT_PROCESS (Idempotent)</option>
+                                <option value="EMAIL_DISPATCH">EMAIL_DISPATCH</option>
+                                <option value="ORDER_INVOICE">ORDER_INVOICE</option>
+                                <option value="SIMULATED_FAILURE">SIMULATED_FAILURE (Test Retries &amp; DLQ)</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label for="priority">Priority (1 = Low, 10 = Urgent)</label>
+                            <input type="number" id="priority" min="1" max="10" value="5">
+                        </div>
+                    </div>
+
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="delay-sec">Delayed Execution (Seconds from now)</label>
+                            <input type="number" id="delay-sec" min="0" value="0" placeholder="0 = immediate">
+                        </div>
+                        <div class="form-group">
+                            <label for="max-retries">Max Retries</label>
+                            <input type="number" id="max-retries" min="0" max="10" value="3">
+                        </div>
+                        <div class="form-group">
+                            <label for="backoff-base">Backoff Multiplier (Sec)</label>
+                            <input type="number" id="backoff-base" min="1" value="2">
+                        </div>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="idempotency-key">Idempotency Key (Optional)</label>
+                        <input type="text" id="idempotency-key" placeholder="e.g. order-txn-uuid-8839">
+                    </div>
+
+                    <div class="form-group">
+                        <label for="job-payload">Payload (JSON)</label>
+                        <textarea id="job-payload" rows="3">{"amount": 99.50, "accountId": "acc_cust_042"}</textarea>
+                    </div>
+
+                    <div class="form-actions">
+                        <button type="submit" class="btn btn-primary">Enqueue Job</button>
+                        <button type="button" id="quick-demo-btn" class="btn btn-outline">Demo: Failure &rarr; Exponential Backoff &rarr; DLQ</button>
+                    </div>
+                </form>
+            </div>
+
+            <!-- Architecture Info Card -->
+            <div class="card info-card">
+                <div class="card-header">
+                    <h2>Architecture Highlights</h2>
+                    <span class="badge badge-success">Production Ready</span>
+                </div>
+                <ul class="feature-list">
+                    <li>
+                        <strong>Atomic Worker Leases:</strong> Uses <code>SELECT ... FOR UPDATE SKIP LOCKED</code> to prevent worker contention and race conditions.
+                    </li>
+                    <li>
+                        <strong>Crash-Resilience:</strong> If a worker crashes mid-task, the visibility lease expires and the zombie reaper reclaims it automatically.
+                    </li>
+                    <li>
+                        <strong>Exponential Backoff:</strong> Retries with capped exponential formula <code>base &times; 2^(retry-1)</code> before routing to DLQ.
+                    </li>
+                    <li>
+                        <strong>DLQ Replay Engine:</strong> Isolates permanently failing tasks for manual inspection and zero-loss replay.
+                    </li>
+                    <li>
+                        <strong>Strict Idempotency:</strong> Ensures partial job crashes never double-charge or duplicate external side effects.
+                    </li>
+                </ul>
+            </div>
+        </section>
+
+        <!-- Dead Letter Queue Section -->
+        <section class="card" id="dlq-section">
+            <div class="card-header">
+                <h2>Dead-Letter Queue (DLQ) Recovery</h2>
+                <div class="actions">
+                    <button id="replay-all-btn" class="btn btn-danger-outline">Replay All Failed Jobs</button>
+                </div>
+            </div>
+            <div class="table-container">
+                <table id="dlq-table">
+                    <thead>
+                        <tr>
+                            <th>DLQ ID</th>
+                            <th>Original Job ID</th>
+                            <th>Type</th>
+                            <th>Retry Count</th>
+                            <th>Failure Reason</th>
+                            <th>Moved to DLQ</th>
+                            <th>Status</th>
+                            <th>Action</th>
+                        </tr>
+                    </thead>
+                    <tbody id="dlq-tbody">
+                        <tr><td colspan="8" class="text-center">No dead letter jobs present.</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- Live Jobs Queue -->
+        <section class="card">
+            <div class="card-header">
+                <h2>Active Job Queue</h2>
+                <div class="filters">
+                    <button class="filter-btn active" data-status="">All</button>
+                    <button class="filter-btn" data-status="PENDING">Pending</button>
+                    <button class="filter-btn" data-status="RUNNING">Running</button>
+                    <button class="filter-btn" data-status="COMPLETED">Completed</button>
+                    <button class="filter-btn" data-status="DEAD_LETTER">DLQ</button>
+                </div>
+            </div>
+            <div class="table-container">
+                <table id="jobs-table">
+                    <thead>
+                        <tr>
+                            <th>Job ID</th>
+                            <th>Type</th>
+                            <th>Priority</th>
+                            <th>Status</th>
+                            <th>Retries</th>
+                            <th>Scheduled / Leased</th>
+                            <th>Worker</th>
+                            <th>Payload</th>
+                            <th>Created</th>
+                        </tr>
+                    </thead>
+                    <tbody id="jobs-tbody">
+                        <tr><td colspan="9" class="text-center">Loading jobs...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+    </main>
+
+    <script src="app.js"></script>
+</body>
+</html>
