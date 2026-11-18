@@ -1,0 +1,108 @@
+version: '3.8'
+
+services:
+  # ==========================================================
+  # PostgreSQL Queue Persistence Store
+  # ==========================================================
+  postgres:
+    image: postgres:16-alpine
+    container_name: rjq-postgres
+    environment:
+      POSTGRES_DB: jobqueuedb
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgrespassword
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d jobqueuedb"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - queue-network
+
+  # ==========================================================
+  # Decoupled Producer Service (REST API & Web UI)
+  # Accepts submissions, serves dashboard, worker disabled
+  # ==========================================================
+  producer-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: rjq-producer-api
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      SPRING_PROFILES_ACTIVE: postgres
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/jobqueuedb
+      SPRING_DATASOURCE_USERNAME: postgres
+      SPRING_DATASOURCE_PASSWORD: postgrespassword
+      QUEUE_NODE_MODE: PRODUCER
+      QUEUE_WORKER_ENABLED: "false"
+    ports:
+      - "8080:8080"
+    networks:
+      - queue-network
+    restart: on-failure
+
+  # ==========================================================
+  # Background Worker Node 1 (Consumer Lease Engine)
+  # Concurrently polls with FOR UPDATE SKIP LOCKED
+  # ==========================================================
+  worker-node-1:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: rjq-worker-1
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      SPRING_PROFILES_ACTIVE: postgres
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/jobqueuedb
+      SPRING_DATASOURCE_USERNAME: postgres
+      SPRING_DATASOURCE_PASSWORD: postgrespassword
+      QUEUE_NODE_MODE: WORKER
+      QUEUE_WORKER_ENABLED: "true"
+      QUEUE_WORKER_WORKER_ID: worker-cluster-node-1
+      QUEUE_WORKER_CONCURRENCY: 4
+      QUEUE_WORKER_BATCH_SIZE: 5
+    networks:
+      - queue-network
+    restart: on-failure
+
+  # ==========================================================
+  # Background Worker Node 2 (Horizontally Scaled Consumer)
+  # Demonstrates zero lock contention across independent containers
+  # ==========================================================
+  worker-node-2:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: rjq-worker-2
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      SPRING_PROFILES_ACTIVE: postgres
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/jobqueuedb
+      SPRING_DATASOURCE_USERNAME: postgres
+      SPRING_DATASOURCE_PASSWORD: postgrespassword
+      QUEUE_NODE_MODE: WORKER
+      QUEUE_WORKER_ENABLED: "true"
+      QUEUE_WORKER_WORKER_ID: worker-cluster-node-2
+      QUEUE_WORKER_CONCURRENCY: 4
+      QUEUE_WORKER_BATCH_SIZE: 5
+    networks:
+      - queue-network
+    restart: on-failure
+
+volumes:
+  postgres_data:
+
+networks:
+  queue-network:
+    driver: bridge
